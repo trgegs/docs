@@ -4,9 +4,9 @@ redirects:
   - 02_high_availibility
 ---
 
-BigAnimal supports three cluster types: 
+BigAnimal supports three types of cluster: 
 - Single node
-- Standard high availability
+- High availability
 - Extreme high availability (beta)
 
 You choose which type of cluster you want on the [Create Cluster](https://portal.biganimal.com/create-cluster) page in the [BigAnimal](https://portal.biganimal.com) portal.  
@@ -22,7 +22,7 @@ Postgres distribution and version support varies by cluster type.
 
 ## Single node
 
-For nonproduction use cases where high availability is not a primary concern, a cluster deployment with high availability not enabled provides one primary with no standby replicas for failover or read-only workloads. 
+For nonproduction use cases where high availability is not a primary concern, a cluster deployment without high availability provides a single primary node.
 
 In case of unrecoverable failure of the primary, a restore from a backup is required. 
 
@@ -30,36 +30,49 @@ In case of unrecoverable failure of the primary, a restore from a backup is requ
 
 ## High availability
 
-The high availability option is provided to minimize downtime in cases of failures. High-availability clusters—one *primary* and one or two *standby replicas*—are configured automatically, with standby replicas staying up to date through physical streaming replication. 
+The high availability option minimizes downtime in case of failure. High-availability clusters—one *primary* and one or two *standby replicas*—are configured automatically, with standby replicas staying up to date through physical streaming replication. 
 
-If read-only workloads are enabled, then standby replicas serve the read-only workoads. In a two-node cluster, the single standby replica serves read-only workloads. In a three-node cluster, both standby replicas serve read-only workloads. The connections are made to the two standby replicas randomly and on a per-connection basis. 
-
-In cloud regions with availability zones, clusters are provisioned across zones to provide fault tolerance in the face of a datacenter failure.
+If read-only workloads are enabled, then standby replicas serve the read-only workoads.
 
 In case of temporary or permanent unavailability of the primary, a standby replica becomes the primary.
 
-![*BigAnimal Cluster4*](images/HA-diagram-2x.png)
+In cloud regions with availability zones, clusters are provisioned across zones to provide fault tolerance in the face of a datacenter failure.
 
-Incoming client connections are always routed to the current primary. In case of failure of the primary, a standby replica is automatically promoted to primary, and new connections are routed to the new primary. When the old primary recovers, it rejoins the cluster as a standby replica.
+Incoming client connections (write workloads) are always routed to the current primary. In case of unavailability of the primary, a standby replica is automatically promoted to primary, and new connections are routed to the new primary. When the failed previous primary recovers, it rejoins the cluster as a standby replica.
 
 ### Standby replicas
 
-By default, replication is synchronous to one standby replica and asynchronous to the other. That is, one standby replica must confirm that a transaction record was written to disk before the client receives acknowledgment of a successful commit. 
+By default, replication is done synchronously to one standby replica and asynchronously to another replica in case of three-node clusters. That is, one standby replica must confirm that a transaction record was written to disk before the client receives acknowledgment of a successful commit. You can modify this behavior on a per-transaction, per-session, per-user, or per-database basis with appropriate `SET` or `ALTER` commands.
 
-In a cluster with one primary and one replica (a two-node high availability cluster), you run the risk of the cluster being unavailable for writes because it doesn't have the same level of reliability as a three-node cluster. Note that BigAnimal automatically disables synchronous replication during maintenance operations of a two-node cluster to ensure write availability. You can also change from the default synchronous replication for a two-node cluster to asynchronous replication on a per-session/per-transaction basis.
+### Two node cluster
 
-In PostgreSQL terms, `synchronous_commit` is set to `on` and `synchronous_standby_names` is set to `ANY 1 (replica-1, replica-2)`. You can modify this behavior on a per-transaction, per-session, per-user, or per-database basis with appropriate `SET` or `ALTER` commands. 
+In a two-node cluster, the single standby replica can serve read-only workloads. 
 
-To ensure write availability, BigAnimal disables synchronous replication during maintenance operations of a two-node cluster.
+In a cluster with one primary and one replica, there is a higher risk of the cluster being unavailable for writes than with a three-node cluster because changes will not be accepted unless at least one replica confirms receipt of the data.
 
-Since BigAnimal replicates to only one node synchronously, some standby replicas in three-node clusters might experience replication lag. Also, if you override the BigAnimal synchronous replication configuration, then the standby replicas are inconsistent. 
+Note that to ensure write availability, BigAnimal disables synchronous replication during maintenance operations of a two-node cluster.
+
+You can also change from the default synchronous replication for a two-node cluster to asynchronous replication on a per-session/per-transaction basis.
+
+If you override the BigAnimal synchronous replication configuration, then the standby replica may be inconsistent for transactions affected by overridden synchronization settings.
+
+
+### Three node cluster
+
+In a three-node cluster, both standby replicas can serve read-only workloads. The connections are made to the two standby replicas randomly and on a per-connection basis.
+
+In PostgreSQL terms, `synchronous_commit` is set to `on` and `synchronous_standby_names` is set to `ANY 1 (replica-1, replica-2)`.
+
+Since BigAnimal replicates to one node synchronously, the other standby replica in three-node clusters might experience replication lag. Additionally, like with two-node clusters, if you override the BigAnimal synchronous replication configuration, then the standby replica may be inconsistent for transactions affected by overridden synchronization settings.
+
+![*BigAnimal Cluster4*](images/HA-diagram-2x.png)
 
 
 ## Extreme high availability (beta)
 
 Extreme high availability clusters are powered by EDB Postgres Distributed, a logical replication platform that delivers more advanced cluster management compared to a physical replication based system. 
 
-Extreme high availability clusters can be deployed with either PostgreSQL or Oracle compatibility. 
+Extreme high availability clusters can be deployed with either PostgreSQL or Oracle compatibile distributions. 
 
 Extreme High Availability clusters deploy four data-hosting "BDR" nodes across two availability zones (A and B in the diagram below). One of these nodes will be the leader at any given time (A.1 in the diagram). The rest are typically referred to as "shadow" nodes. Any shadow node can be promoted to leadership at any time by the HARP router. The third availability zone (C) contains one node called the "witness". This node does not host data; it exists only for management purposes, to support operations that require consensus in case of an availability zone failure.
 
