@@ -4,40 +4,37 @@ redirects:
   - /pgd/latest/bdr/conflicts/
 ---
 
-EDB Postgres Distributed is an active/active or multi-master DBMS. If used asynchronously, writes to the same or related rows from multiple different nodes can result in data conflicts when using standard data types.
+EDB Postgres Distributed (PGD) is an active/active or multi-master DBMS with configurable and often adaptable guarantees for data consistency. When used asynchronously, PGD writes to the same or related rows on multiple different nodes can result in so-called "data conflicts" when using PostgreSQL standard data types.
 
-Conflicts aren't errors. In most cases, they are events that PGD can detect and resolve as they occur. Resolving them depends on the nature of the application and the meaning of the data, so it's important for
-PGD to provide the application a range of choices for how to resolve conflicts.
+Conflicts aren't errors. In most cases, they are events that PGD can detect and resolve as they occur. Resolving them depends on the nature of the application and the meaning of the data, so it's important for PGD to provide the application a range of choices for how to resolve conflicts.
 
-By default, conflicts are resolved at the row level. When changes from two nodes conflict, PGD picks either the local or remote tuple and the discards the other. For example, the commit timestamps might be compared for the two conflicting changes and the newer one kept. This approach ensures that all nodes converge to the same result and establishes commit-order-like semantics on the whole cluster.
+By default, conflicts are resolved at the row level. When changes from two nodes conflict, PGD picks either the local or remote tuple and the discards the other. For example, the commit timestamps might be compared for the two conflicting changes and the newer one kept. This approach ensures that all nodes converge to the same result and it establishes commit-order-like semantics for the whole cluster.
 
-Conflict handling is configurable, as described in [Conflict resolution](#conflict-resolution). PGD can detect conflicts and handle them differently for each table using conflict triggers, described in [Stream triggers](../striggers).
+Conflict handling is configurable, as described in [Conflict resolution](#conflict-resolution). PGD can detect conflicts and handle them differently for each table using conflict triggers, as described in [Stream triggers](../striggers).
 
-Column-level conflict detection and resolution is available with PGD, described in [CLCD](column-level-conflicts).
+Column-level conflict detection and resolution is available with PGD, as described in [CLCD](column-level-conflicts).
 
-By default, all conflicts are logged to `bdr.conflict_history`. If conflicts are possible, then table owners must monitor for them and analyze how to avoid them or make plans to handle them regularly as an application task. The [LiveCompare](/livecompare/latest) tool is also available to scan regularly for divergence.
+By default, all conflicts are logged to the `bdr.conflict_history` table. If conflicting operations can happen against a table, (as a consequence of the way the client application does CRUD operations against the PGD cluster nodes), the owner of the table must monitor for these conflicts and analyze how to avoid them or make plans to handle them regularly as an application task. The EDB [LiveCompare](/livecompare/latest) tool is available to EDB customers to scan regularly for divergence.
 
-Some clustering systems use distributed lock mechanisms to prevent concurrent access to data. These can perform reasonably when servers are very close to each other but can't support geographically distributed applications where very low latency is critical for acceptable performance.
+Some clustering systems use distributed locking mechanisms to prevent concurrent access to data. These can perform reasonably well when servers are very close to each other in terms of latency, but can't support geographically distributed applications where very low latency is critical for acceptable performance.
 
-Distributed locking is essentially a pessimistic approach. PGD advocates an optimistic approach, which is to avoid conflicts where possible but allow some types of conflicts to occur and resolve them when they arise.
+Distributed locking is essentially a pessimistic approach, avoiding conflicts at all costs yet sacrificing performance. PGD advocates an optimistic approach, which is to avoid conflicts where possible but allow some types of conflicts to occur and resolve them when they arise.
 
 ## How conflicts happen
 
-Inter-node conflicts arise as a result of sequences of events that can't happen if all the involved transactions happen concurrently on the same node. Because the nodes exchange changes only after the transactions commit, each transaction is individually valid on the node it committed on. It isn't
-valid if applied on another node that did other conflicting work at the same time.
+Inter-node conflicts are the result of a series of transactions that can only happen if these transactions take place concurrently on different nodes. Because the nodes transmit changes to each other only after the transactions commit, each transaction is individually valid on the node it committed on, yet isn't valid if applied on another node that did other conflicting work at the same time.
 
-Since PGD replication essentially replays the transaction on the other nodes, the replay operation can fail if there's a conflict between a transaction being applied and a transaction that was committed on the receiving node.
+Since PGD replication essentially replays the transaction on the other nodes, the replay operation can fail if there's a conflict between a transaction being replayed and applied on the receiving node, and a transaction that was committed locally on the receiving node.
 
-Most conflicts can't happen when all transactions run on a single node because Postgres has inter-transaction communication mechanisms to prevent it. Examples of these mechanisms are `UNIQUE` indexes, `SEQUENCE` operations, row and relation locking, and `SERIALIZABLE` dependency tracking. All of these mechanisms are ways to communicate between ongoing transactions to prevent undesirable concurrency
-issues.
+Most conflicts can't happen when all transactions run on a single node because Postgres has inter-transaction mechanisms to prevent them. Examples of these mechanisms are `UNIQUE` indexes, `SEQUENCE` operations, row and relation locking, and the `SERIALIZABLE` level of Multi-version concurrency control (MVCC) dependency tracking. All of these mechanisms are ways to communicate between ongoing transactions to prevent undesirable concurrency issues.
 
-PGD doesn't have a distributed transaction manager or lock manager. That's part of why it performs well with latency and network partitions. As a result, transactions on different nodes execute entirely independently from each other when using the default, which is lazy replication. Less independence between nodes can avoid conflicts altogether, which is why PGD also offers Eager Replication for when this is important.
+PGD doesn't have a distributed transaction manager or lock manager. That is part of why it performs well with latency and network partitions. As a result, transactions on different nodes execute entirely independently from each other when using the default replication setting, which is "lazy replication". Less independence between nodes can avoid conflicts altogether, which is why PGD also offers Eager Replication for when this is important.
 
 ## Types of conflict
 
 ### PRIMARY KEY or UNIQUE conflicts
 
-The most common conflicts are row conflicts, where two operations affect a row with the same key in ways they can't on a single node. PGD can detect most of those and applies the `update_if_newer` conflict resolver.
+The most common conflicts are row conflicts, where two operations affect a row with the same key in ways they can't on a single node. PGD can detect most of these and it applies the `update_if_newer` conflict resolver.
 
 Row conflicts include:
 
@@ -48,19 +45,19 @@ Row conflicts include:
 -   `INSERT` versus `DELETE`
 -   `DELETE` versus `DELETE`
 
-The view `bdr.node_conflict_resolvers` provides information on how conflict resolution is currently configured for all known conflict types.
+The `bdr.node_conflict_resolvers` view provides information on how conflict resolution is currently configured for all known conflict types.
 
 #### INSERT/INSERT conflicts
 
-The most common conflict, `INSERT`/`INSERT`, arises where `INSERT` operations on two different nodes create a tuple with the same `PRIMARY KEY` values (or if no `PRIMARY KEY` exists, the same values for a single `UNIQUE` constraint).
+The most common conflict, `INSERT`/`INSERT`, happens when `INSERT` operations on two different nodes create a tuple with the same `PRIMARY KEY` values (or if no `PRIMARY KEY` exists, the same values for a single `UNIQUE` constraint).
 
-PGD handles this situation by retaining the most recently inserted tuple of the two according to the originating node's timestamps. (A user-defined conflict handler can override this behavior.)
+PGD handles this situation by keeping the most recently inserted tuple of the two according to the originating node's timestamps. (A user-defined conflict handler can override this behavior.)
 
 This conflict generates the `insert_exists` conflict type, which is by default resolved by choosing the newer row, based on commit time, and keeping only that one (`update_if_newer` resolver). You can configure other resolvers. See [Conflict resolution](#conflict-resolution) for details.
 
 To resolve this conflict type, you can also use column-level conflict resolution and user-defined conflict triggers.
 
-You can effectively eliminate this type of conflict by using [global sequences](../sequences).
+You can effectively eliminate this type of conflict by using [global sequences](../sequences) for the primary key or the column with the unique constraint.
 
 #### INSERT operations that violate multiple UNIQUE constraints
 
@@ -69,9 +66,9 @@ An `INSERT`/`INSERT` conflict can violate more than one `UNIQUE` constraint, of 
 In case of such a conflict, you must remove some rows for replication to continue. Depending on the resolver setting for `multiple_unique_conflicts`, the apply process either exits with error, skips the incoming row, or deletes some of the rows. The deletion tries to preserve the row with the correct `PRIMARY KEY` and delete the others.
 
 !!! Warning
-    In case of multiple rows conflicting this way, if the result of conflict resolution is to proceed with the insert operation, some of the data is always deleted.
+    If multiple rows conflict in this way, and the resulting decision of the conflict resolution is to proceed with the insert operation, some of the data is always deleted.
 
-You can also define a different behavior using a conflict trigger.
+Different conflict resolution behavior can be configured with a conflict trigger.
 
 #### UPDATE/UPDATE conflicts
 
@@ -89,7 +86,7 @@ Conflicts on the update of the primary key are [divergent conflicts](#divergent-
 
 Updating a primary key is possible in Postgres, but there are issues in both Postgres and PGD.
 
-A simple schema provides an example that explains:
+A simple schema provides an example that shows how this works:
 
 ```sql
 CREATE TABLE pktest (pk integer primary key, val integer);
@@ -108,7 +105,7 @@ However, suppose the table has multiple rows:
 INSERT INTO pktest VALUES (3,3);
 ```
 
-Some UPDATE operations succeed:
+Some UPDATE operations will succeed:
 
 ```sql
 UPDATE pktest SET pk=4 WHERE pk=3;
@@ -129,7 +126,7 @@ ERROR:  duplicate key value violates unique constraint "pktest_pkey"
 DETAIL:  Key (pk)=(4) already exists
 ```
 
-So for Postgres applications that update primary keys, be careful to avoid runtime errors, even without PGD.
+For applications that update primary keys, be careful to avoid runtime errors, even without PGD.
 
 With PGD, the situation becomes more complex if UPDATE operations are allowed from multiple locations at same time.
 
@@ -174,7 +171,7 @@ SELECT * FROM pktest;
 (2 rows)
 ```
 
-You can identify and resolve this situation using [LiveCompare](/livecompare/latest).
+You can identify and resolve this situation using EDB's [LiveCompare](/livecompare/latest).
 
 Concurrent conflicts present problems. Executing these two changes concurrently isn't easy to resolve:
 
@@ -183,14 +180,14 @@ node1: UPDATE pktest SET pk=6, val=8 WHERE pk = 5;
 node2: UPDATE pktest SET pk=6, val=9 WHERE pk = 5;
 ```
 
-Both changes are applied locally, causing a divergence between the nodes. But the apply on the target fails on both nodes with a duplicate key-value violation error. This error causes the replication to halt and requires manual resolution.
+Both changes are applied locally, causing a divergence between the nodes. But the apply by PGD replication on the target fails on both nodes with a duplicate key-value violation error. This error causes the replication to halt and requires manual resolution.
 
 You can avoid this duplicate key violation error, and replication doesn't break, if you set the conflict_type `update_pkey_exists` to `skip`, `update`, or `update_if_newer`. This approach can still lead to divergence depending on the nature of the update.
 
 You can avoid divergence in cases where the same old key is being updated by the same new key concurrently by setting `update_pkey_exists` to `update_if_newer`. However, in certain situations,
 divergence occurs even with `update_if_newer`, namely when two different rows both are updated concurrently to the same new primary key.
 
-As a result, we recommend strongly against allowing primary key UPDATE operations in your applications, especially with PGD. If parts of your application change primary keys, then to avoid concurrent
+As a result, we recommend strongly against allowing primary key UPDATE operations in your applications, especially with PGD. If parts of your application do change primary keys, then to avoid concurrent
 changes, make those changes using Eager Replication.
 
 !!! Warning
@@ -200,24 +197,24 @@ changes, make those changes using Eager Replication.
 
 Like [INSERT operations that violate multiple UNIQUE constraints](#insert-operations-that-violate-multiple-unique-constraints), when an incoming `UPDATE` violates more than one `UNIQUE` index (or the `PRIMARY KEY`), PGD raises a `multiple_unique_conflicts` conflict.
 
-PGD supports deferred unique constraints. If a transaction can commit on the source, then it applies cleanly on target, unless it sees conflicts. However, you can't use a deferred primary key as a REPLICA IDENTITY, so the use cases are already limited by that and the warning about using multiple unique constraints.
+PGD supports deferred unique constraints. If a transaction can commit on the source, then it applies cleanly on target, unless it sees conflicts. However, you can't use a deferred primary key as a REPLICA IDENTITY, limiting the use cases, just as the warning about using multiple unique constraints.
 
 #### UPDATE/DELETE conflicts
 
-One node can update a row that another node deletes at ths same time. In this case an `UPDATE`/`DELETE` conflict can occur on replay.
+One node can update a row that another node deletes at the same time. In this case an `UPDATE`/`DELETE` conflict can occur on replay.
 
-If the deleted row is still detectable (the deleted row wasn't removed by `VACUUM`), the `update_recently_deleted` conflict is generated. By default, the `UPDATE` is skipped, but you can configure the resolution for this. See [Conflict resolution](#conflict-resolution) for details.
+If the deleted row has not yet been removed by `VACUUM`, the `update_recently_deleted` conflict is generated. By default, the `UPDATE` is skipped, but you can configure the resolution for this. See [Conflict resolution](#conflict-resolution) for details.
 
 The database can clean up the deleted row by the time the `UPDATE` is received in case the local node is lagging behind in replication. In this case, PGD can't differentiate between `UPDATE`/`DELETE` conflicts and [INSERT/UPDATE conflicts](#insertupdate-conflicts). It generates the `update_missing` conflict.
 
 Another type of conflicting `DELETE` and `UPDATE` is a `DELETE` that comes after the row was updated locally. In this situation, the outcome depends on the type of conflict detection used. When using the
-default, [origin conflict detection](#origin-conflict-detection), no conflict is detected, leading to the `DELETE` being applied and the row removed. If you enable [row version conflict detection](#row-version-conflict-detection), a `delete_recently_updated` conflict is generated. The default resolution for this conflict type is to apply the `DELETE` and remove the row. However, you can configure this or a conflict trigger can handled it.
+default, [origin conflict detection](#origin-conflict-detection), no conflict is detected, leading to the `DELETE` being applied and the row removed. If you enable [row version conflict detection](#row-version-conflict-detection), a `delete_recently_updated` conflict is generated. The default resolution for this conflict type is to apply the `DELETE` and remove the row. However, you can configure this or a conflict trigger can handle it.
 
 #### INSERT/UPDATE conflicts
 
 When using the default asynchronous mode of operation, a node might receive an `UPDATE` of a row before the original `INSERT` was received. This can happen only when three or more nodes are active (see [Conflicts with three or more nodes](#conflicts-with-three-or-more-nodes)).
 
-When this happens, the `update_missing` conflict is generated. The default conflict resolver is `insert_or_skip`, though you can use `insert_or_error` or `skip` instead. Resolvers that do insert-or-action first try to `INSERT` a new row based on data from the `UPDATE` when possible (when the whole row was received). For reconstructing the row to be possible, the table either needs to have
+When this happens, the `update_missing` conflict is generated. The default conflict resolver is `insert_or_skip`, though you can use `insert_or_error` or `skip` instead. Resolvers that do insert-or-action first try to `INSERT` a new row based on data from the `UPDATE` when possible (when the whole row was received). For reconstruction of the row to be possible, the table either needs to have
 `REPLICA IDENTITY FULL` or the row must not contain any toasted data.
 
 See [TOAST support details](#toast-support-details) for more info about toasted data.
@@ -236,11 +233,11 @@ A `DELETE`/`DELETE` conflict arises when two different nodes concurrently delete
 
 This scenario always generates a `delete_missing` conflict, which is by default resolved by skipping the operation.
 
-This conflict is harmless since both `DELETE` operations have the same effect. You can safely ignroe one of them.
+This conflict is harmless since both `DELETE` operations have the same effect. You can safely ignore one of them.
 
 #### Conflicts with three or more nodes
 
-If one node inserts a row that's then replayed to a second node and updated there, a third node can receive the `UPDATE` from the second node before it receives the `INSERT` from the first node. This scenario is an `INSERT`/`UPDATE` conflict.
+If one node inserts a row that is then replayed to a second node and updated there, a third node can receive the `UPDATE` from the second node before it receives the `INSERT` from the first node. This scenario is an `INSERT`/`UPDATE` conflict.
 
 These conflicts are handled by discarding the `UPDATE`, which can lead to different data on different nodes. These are [divergent conflicts](#divergent-conflicts).
 
